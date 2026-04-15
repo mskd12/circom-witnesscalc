@@ -169,61 +169,6 @@ pub unsafe extern "C" fn gw_prepare_graph(
 }
 
 /// # Safety
-/// `handle` must have been returned by a successful call to
-/// `gw_prepare_graph` and not yet freed via `gw_free_graph`.
-#[no_mangle]
-pub unsafe extern "C" fn gw_calc_witness_prepared(
-    handle: *const c_void,
-    inputs: *const c_char,
-    wtns_data: *mut *mut c_void,
-    wtns_len: *mut usize,
-    status: *mut gw_status_t,
-) -> c_int {
-    if handle.is_null() {
-        prepare_status(status, GW_ERROR_CODE_ERROR, "handle is null");
-        return 1;
-    }
-    if inputs.is_null() {
-        prepare_status(status, GW_ERROR_CODE_ERROR, "inputs is null");
-        return 1;
-    }
-
-    let inputs_str = match CStr::from_ptr(inputs).to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            prepare_status(
-                status,
-                GW_ERROR_CODE_ERROR,
-                format!("Failed to parse inputs as UTF-8 string: {}", e).as_str(),
-            );
-            return 1;
-        }
-    };
-
-    let graph = &*(handle as *const PreparedGraph);
-    let witness_data = match calc_witness_prepared(graph, inputs_str) {
-        Ok(w) => w,
-        Err(e) => {
-            prepare_status(
-                status,
-                GW_ERROR_CODE_ERROR,
-                format!("Failed to calculate witness: {:?}", e).as_str(),
-            );
-            return 1;
-        }
-    };
-
-    // Hand the Vec's buffer directly to C without a memcpy. `into_boxed_slice`
-    // shrinks to len==capacity so (ptr, len) is enough to reconstruct for
-    // freeing. Caller must release via `gw_free_witness` (same allocator).
-    let boxed: Box<[u8]> = witness_data.into_boxed_slice();
-    *wtns_len = boxed.len();
-    *wtns_data = Box::into_raw(boxed) as *mut c_void;
-
-    0
-}
-
-/// # Safety
 /// `handle` must have been returned by `gw_prepare_graph` and not yet freed.
 /// On success, `*fe_data` points to `*fe_num_elements * fe_size` bytes where
 /// `fe_size` is the graph's field-element byte size (32 for bn254, 8 for
@@ -421,31 +366,6 @@ pub fn prepare_graph(graph_data: &[u8]) -> Result<PreparedGraph, Box<dyn std::er
     Ok(PreparedGraph { nodes, signals, input_info })
 }
 
-pub fn calc_witness_prepared(
-    graph: &PreparedGraph,
-    inputs: &str,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    if let Some(nodes) = graph.nodes.as_any().downcast_ref::<Nodes<U254, VecNodes>>() {
-        let result = calc_witness_typed(
-            nodes, inputs, &graph.signals, &graph.input_info)?;
-        let vec_witness: Vec<FieldElement<32>> = result
-            .iter()
-            .map(|a| TryInto::<[u8; 32]>::try_into(a.as_le_slice()).unwrap().into())
-            .collect();
-        Ok(wtns_from_witness2(vec_witness, nodes.prime()))
-    } else if let Some(nodes) = graph.nodes.as_any().downcast_ref::<Nodes<U64, VecNodes>>() {
-        let result = calc_witness_typed(
-            nodes, inputs, &graph.signals, &graph.input_info)?;
-        let vec_witness: Vec<FieldElement<8>> = result
-            .iter()
-            .map(|a| TryInto::<[u8; 8]>::try_into(a.as_le_slice()).unwrap().into())
-            .collect();
-        Ok(wtns_from_witness2(vec_witness, nodes.prime()))
-    } else {
-        Err(anyhow!("Invalid nodes type").into())
-    }
-}
-
 /// Compute the witness and return the raw field-element bytes (little-endian,
 /// contiguous). No WTNS file-format wrapper. Returns `(bytes, num_elements)`;
 /// element size can be derived as `bytes.len() / num_elements`.
@@ -518,7 +438,8 @@ fn calc_witness_graph(
     let graph = prepare_graph(graph_data)?;
     println!("Graph loaded in {:?}", start.elapsed());
 
-    calc_witness_prepared(&graph, inputs)
+    let (raw, _n) = calc_witness_raw_prepared(&graph, inputs)?;
+    wtns_from_raw(&graph, &raw)
 }
 
 fn calc_witness_typed<T: FieldOps, NS: NodesStorage>(

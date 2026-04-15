@@ -29,19 +29,12 @@ gw_prepare_graph(const void *graph_data, size_t graph_data_len,
                  void **handle_out,
                  gw_status_t *status);
 
-// The returned *wtns_data must be freed with gw_free_witness (NOT free),
-// because the buffer is owned by Rust's global allocator, which may differ
-// from libc's.
-int
-gw_calc_witness_prepared(const void *handle,
-                         const char *inputs,
-                         void **wtns_data, size_t *wtns_len,
-                         gw_status_t *status);
-
-// Compute witness and return raw little-endian field-element bytes, without
-// the WTNS file-format wrapper. *fe_data points to fe_num_elements * fe_size
-// bytes where fe_size is 32 for bn254 (derivable from the graph). Free via
+// Compute witness and return raw little-endian field-element bytes. *fe_data
+// points to fe_num_elements * fe_size bytes where fe_size is 32 for bn254
+// (derivable from the graph). Free via
 // gw_free_witness(*fe_data, fe_num_elements * fe_size).
+// Buffers must be freed with gw_free_witness (NOT free), because they are
+// owned by Rust's global allocator, which may differ from libc's.
 int
 gw_calc_witness_raw_prepared(const void *handle,
                              const char *inputs,
