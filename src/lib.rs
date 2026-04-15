@@ -213,19 +213,26 @@ pub unsafe extern "C" fn gw_calc_witness_prepared(
         }
     };
 
-    *wtns_len = witness_data.len();
-    *wtns_data = libc::malloc(witness_data.len());
-    if (*wtns_data).is_null() {
-        prepare_status(status, GW_ERROR_CODE_ERROR, "Failed to allocate memory for wtns_data");
-        return 1;
-    }
-    libc::memcpy(
-        *wtns_data,
-        witness_data.as_ptr() as *const c_void,
-        witness_data.len(),
-    );
+    // Hand the Vec's buffer directly to C without a memcpy. `into_boxed_slice`
+    // shrinks to len==capacity so (ptr, len) is enough to reconstruct for
+    // freeing. Caller must release via `gw_free_witness` (same allocator).
+    let boxed: Box<[u8]> = witness_data.into_boxed_slice();
+    *wtns_len = boxed.len();
+    *wtns_data = Box::into_raw(boxed) as *mut c_void;
 
     0
+}
+
+/// # Safety
+/// `ptr` must have been returned by `gw_calc_witness_prepared` and not yet
+/// freed. `len` must be the length returned alongside it. Do not use `free()`
+/// on this pointer — Rust's allocator may differ from libc.
+#[no_mangle]
+pub unsafe extern "C" fn gw_free_witness(ptr: *mut c_void, len: usize) {
+    if !ptr.is_null() {
+        let slice_ptr = std::ptr::slice_from_raw_parts_mut(ptr as *mut u8, len);
+        drop(Box::from_raw(slice_ptr));
+    }
 }
 
 /// # Safety

@@ -29,11 +29,17 @@ gw_prepare_graph(const void *graph_data, size_t graph_data_len,
                  void **handle_out,
                  gw_status_t *status);
 
+// The returned *wtns_data must be freed with gw_free_witness (NOT free),
+// because the buffer is owned by Rust's global allocator, which may differ
+// from libc's.
 int
 gw_calc_witness_prepared(const void *handle,
                          const char *inputs,
                          void **wtns_data, size_t *wtns_len,
                          gw_status_t *status);
+
+void
+gw_free_witness(void *ptr, size_t len);
 
 void
 gw_free_graph(void *handle);
