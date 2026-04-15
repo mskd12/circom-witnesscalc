@@ -224,9 +224,118 @@ pub unsafe extern "C" fn gw_calc_witness_prepared(
 }
 
 /// # Safety
-/// `ptr` must have been returned by `gw_calc_witness_prepared` and not yet
-/// freed. `len` must be the length returned alongside it. Do not use `free()`
-/// on this pointer — Rust's allocator may differ from libc.
+/// `handle` must have been returned by `gw_prepare_graph` and not yet freed.
+/// On success, `*fe_data` points to `*fe_num_elements * fe_size` bytes where
+/// `fe_size` is the graph's field-element byte size (32 for bn254, 8 for
+/// small-prime test circuits). Caller must release with `gw_free_witness`
+/// using `*fe_num_elements * fe_size` as the length.
+#[no_mangle]
+pub unsafe extern "C" fn gw_calc_witness_raw_prepared(
+    handle: *const c_void,
+    inputs: *const c_char,
+    fe_data: *mut *mut c_void,
+    fe_num_elements: *mut usize,
+    status: *mut gw_status_t,
+) -> c_int {
+    if handle.is_null() {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "handle is null");
+        return 1;
+    }
+    if inputs.is_null() {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "inputs is null");
+        return 1;
+    }
+
+    let inputs_str = match CStr::from_ptr(inputs).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            prepare_status(
+                status,
+                GW_ERROR_CODE_ERROR,
+                format!("Failed to parse inputs as UTF-8 string: {}", e).as_str(),
+            );
+            return 1;
+        }
+    };
+
+    let graph = &*(handle as *const PreparedGraph);
+    let (buf, n) = match calc_witness_raw_prepared(graph, inputs_str) {
+        Ok(x) => x,
+        Err(e) => {
+            prepare_status(
+                status,
+                GW_ERROR_CODE_ERROR,
+                format!("Failed to calculate witness: {:?}", e).as_str(),
+            );
+            return 1;
+        }
+    };
+
+    let boxed: Box<[u8]> = buf.into_boxed_slice();
+    *fe_num_elements = n;
+    *fe_data = Box::into_raw(boxed) as *mut c_void;
+
+    0
+}
+
+/// # Safety
+/// `handle` must be a live graph. `fe_data` must point to `fe_num_elements *
+/// fe_size` bytes of raw little-endian field elements. On success `*wtns_data`
+/// points to WTNS v2 bytes that must be freed via `gw_free_witness`.
+#[no_mangle]
+pub unsafe extern "C" fn gw_wtns_from_raw(
+    handle: *const c_void,
+    fe_data: *const c_void,
+    fe_num_elements: usize,
+    wtns_data: *mut *mut c_void,
+    wtns_len: *mut usize,
+    status: *mut gw_status_t,
+) -> c_int {
+    if handle.is_null() {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "handle is null");
+        return 1;
+    }
+    if fe_data.is_null() {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "fe_data is null");
+        return 1;
+    }
+
+    let graph = &*(handle as *const PreparedGraph);
+    let fe_size = if graph.nodes.as_any().downcast_ref::<Nodes<U254, VecNodes>>().is_some() {
+        32
+    } else if graph.nodes.as_any().downcast_ref::<Nodes<U64, VecNodes>>().is_some() {
+        8
+    } else {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "Invalid nodes type");
+        return 1;
+    };
+    let byte_len = fe_num_elements * fe_size;
+    let bytes = from_raw_parts(fe_data as *const u8, byte_len);
+
+    let buf = match wtns_from_raw(graph, bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            prepare_status(
+                status,
+                GW_ERROR_CODE_ERROR,
+                format!("Failed to build WTNS: {:?}", e).as_str(),
+            );
+            return 1;
+        }
+    };
+
+    let boxed: Box<[u8]> = buf.into_boxed_slice();
+    *wtns_len = boxed.len();
+    *wtns_data = Box::into_raw(boxed) as *mut c_void;
+
+    0
+}
+
+/// # Safety
+/// `ptr` must have been returned by any `gw_calc_witness*` or `gw_wtns_*`
+/// function and not yet freed. `len` must be the byte length returned
+/// alongside it. Do not use `free()` on this pointer — Rust's allocator may
+/// differ from libc.
 #[no_mangle]
 pub unsafe extern "C" fn gw_free_witness(ptr: *mut c_void, len: usize) {
     if !ptr.is_null() {
@@ -332,6 +441,70 @@ pub fn calc_witness_prepared(
             .map(|a| TryInto::<[u8; 8]>::try_into(a.as_le_slice()).unwrap().into())
             .collect();
         Ok(wtns_from_witness2(vec_witness, nodes.prime()))
+    } else {
+        Err(anyhow!("Invalid nodes type").into())
+    }
+}
+
+/// Compute the witness and return the raw field-element bytes (little-endian,
+/// contiguous). No WTNS file-format wrapper. Returns `(bytes, num_elements)`;
+/// element size can be derived as `bytes.len() / num_elements`.
+pub fn calc_witness_raw_prepared(
+    graph: &PreparedGraph,
+    inputs: &str,
+) -> Result<(Vec<u8>, usize), Box<dyn std::error::Error>> {
+    if let Some(nodes) = graph.nodes.as_any().downcast_ref::<Nodes<U254, VecNodes>>() {
+        let result = calc_witness_typed(
+            nodes, inputs, &graph.signals, &graph.input_info)?;
+        let n = result.len();
+        let mut buf: Vec<u8> = Vec::with_capacity(n * 32);
+        for r in &result {
+            buf.extend_from_slice(r.as_le_slice());
+        }
+        Ok((buf, n))
+    } else if let Some(nodes) = graph.nodes.as_any().downcast_ref::<Nodes<U64, VecNodes>>() {
+        let result = calc_witness_typed(
+            nodes, inputs, &graph.signals, &graph.input_info)?;
+        let n = result.len();
+        let mut buf: Vec<u8> = Vec::with_capacity(n * 8);
+        for r in &result {
+            buf.extend_from_slice(r.as_le_slice());
+        }
+        Ok((buf, n))
+    } else {
+        Err(anyhow!("Invalid nodes type").into())
+    }
+}
+
+/// Wrap raw little-endian field-element bytes (as produced by
+/// `calc_witness_raw_prepared`) in the WTNS v2 file format. The graph is used
+/// to determine the prime and the field-element size.
+pub fn wtns_from_raw(
+    graph: &PreparedGraph,
+    fe_data: &[u8],
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if let Some(nodes) = graph.nodes.as_any().downcast_ref::<Nodes<U254, VecNodes>>() {
+        if fe_data.len() % 32 != 0 {
+            return Err(anyhow!("fe_data length {} not a multiple of 32", fe_data.len()).into());
+        }
+        let n = fe_data.len() / 32;
+        let mut witness: Vec<FieldElement<32>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let arr: [u8; 32] = fe_data[i * 32..(i + 1) * 32].try_into().unwrap();
+            witness.push(arr.into());
+        }
+        Ok(wtns_from_witness2(witness, nodes.prime()))
+    } else if let Some(nodes) = graph.nodes.as_any().downcast_ref::<Nodes<U64, VecNodes>>() {
+        if fe_data.len() % 8 != 0 {
+            return Err(anyhow!("fe_data length {} not a multiple of 8", fe_data.len()).into());
+        }
+        let n = fe_data.len() / 8;
+        let mut witness: Vec<FieldElement<8>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let arr: [u8; 8] = fe_data[i * 8..(i + 1) * 8].try_into().unwrap();
+            witness.push(arr.into());
+        }
+        Ok(wtns_from_witness2(witness, nodes.prime()))
     } else {
         Err(anyhow!("Invalid nodes type").into())
     }

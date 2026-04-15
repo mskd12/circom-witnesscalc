@@ -38,6 +38,25 @@ gw_calc_witness_prepared(const void *handle,
                          void **wtns_data, size_t *wtns_len,
                          gw_status_t *status);
 
+// Compute witness and return raw little-endian field-element bytes, without
+// the WTNS file-format wrapper. *fe_data points to fe_num_elements * fe_size
+// bytes where fe_size is 32 for bn254 (derivable from the graph). Free via
+// gw_free_witness(*fe_data, fe_num_elements * fe_size).
+int
+gw_calc_witness_raw_prepared(const void *handle,
+                             const char *inputs,
+                             void **fe_data, size_t *fe_num_elements,
+                             gw_status_t *status);
+
+// Wrap raw little-endian field-element bytes into WTNS v2 bytes. Inverse of
+// gw_calc_witness_raw_prepared's output → WTNS. Free *wtns_data via
+// gw_free_witness.
+int
+gw_wtns_from_raw(const void *handle,
+                 const void *fe_data, size_t fe_num_elements,
+                 void **wtns_data, size_t *wtns_len,
+                 gw_status_t *status);
+
 void
 gw_free_witness(void *ptr, size_t len);
 
