@@ -373,14 +373,19 @@ pub fn calc_witness_raw_prepared(
     graph: &PreparedGraph,
     inputs: &str,
 ) -> Result<(Vec<u8>, usize), Box<dyn std::error::Error>> {
+    let t0 = std::time::Instant::now();
     if let Some(nodes) = graph.nodes.as_any().downcast_ref::<Nodes<U254, VecNodes>>() {
         let result = calc_witness_typed(
             nodes, inputs, &graph.signals, &graph.input_info)?;
+        let t_eval = t0.elapsed();
         let n = result.len();
         let mut buf: Vec<u8> = Vec::with_capacity(n * 32);
         for r in &result {
             buf.extend_from_slice(&r.as_le_slice());
         }
+        let t_flatten = t0.elapsed() - t_eval;
+        eprintln!("  raw_prepared stages: eval+inputs={}ms flatten={}ms total={}ms",
+            t_eval.as_millis(), t_flatten.as_millis(), t0.elapsed().as_millis());
         Ok((buf, n))
     } else if let Some(nodes) = graph.nodes.as_any().downcast_ref::<Nodes<U64, VecNodes>>() {
         let result = calc_witness_typed(
