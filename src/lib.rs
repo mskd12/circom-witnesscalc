@@ -459,7 +459,7 @@ pub fn calc_witness_raw_prepared(
         let n = result.len();
         let mut buf: Vec<u8> = Vec::with_capacity(n * 32);
         for r in &result {
-            buf.extend_from_slice(r.as_le_slice());
+            buf.extend_from_slice(&r.as_le_slice());
         }
         Ok((buf, n))
     } else if let Some(nodes) = graph.nodes.as_any().downcast_ref::<Nodes<U64, VecNodes>>() {
@@ -468,7 +468,7 @@ pub fn calc_witness_raw_prepared(
         let n = result.len();
         let mut buf: Vec<u8> = Vec::with_capacity(n * 8);
         for r in &result {
-            buf.extend_from_slice(r.as_le_slice());
+            buf.extend_from_slice(&r.as_le_slice());
         }
         Ok((buf, n))
     } else {
