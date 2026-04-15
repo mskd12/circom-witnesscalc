@@ -373,32 +373,36 @@ pub fn calc_witness_raw_prepared(
     graph: &PreparedGraph,
     inputs: &str,
 ) -> Result<(Vec<u8>, usize), Box<dyn std::error::Error>> {
-    let t0 = std::time::Instant::now();
     if let Some(nodes) = graph.nodes.as_any().downcast_ref::<Nodes<U254, VecNodes>>() {
         let result = calc_witness_typed(
             nodes, inputs, &graph.signals, &graph.input_info)?;
-        let t_eval = t0.elapsed();
-        let n = result.len();
-        let mut buf: Vec<u8> = Vec::with_capacity(n * 32);
-        for r in &result {
-            buf.extend_from_slice(&r.as_le_slice());
-        }
-        let t_flatten = t0.elapsed() - t_eval;
-        eprintln!("  raw_prepared stages: eval+inputs={}ms flatten={}ms total={}ms",
-            t_eval.as_millis(), t_flatten.as_millis(), t0.elapsed().as_millis());
-        Ok((buf, n))
+        Ok(flatten_le_bytes::<U254, 32>(result))
     } else if let Some(nodes) = graph.nodes.as_any().downcast_ref::<Nodes<U64, VecNodes>>() {
         let result = calc_witness_typed(
             nodes, inputs, &graph.signals, &graph.input_info)?;
-        let n = result.len();
-        let mut buf: Vec<u8> = Vec::with_capacity(n * 8);
-        for r in &result {
-            buf.extend_from_slice(&r.as_le_slice());
-        }
-        Ok((buf, n))
+        Ok(flatten_le_bytes::<U64, 8>(result))
     } else {
         Err(anyhow!("Invalid nodes type").into())
     }
+}
+
+// Copies a Vec of repr(transparent)-over-[u64; N/8] field elements into a
+// single Vec<u8> via one bulk memcpy. Assumes little-endian host and that
+// T's byte layout equals FS bytes of LE representation (true for ruint::Uint
+// on x86_64/aarch64). ~300× faster than per-element as_le_slice() allocation.
+fn flatten_le_bytes<T, const FS: usize>(result: Vec<T>) -> (Vec<u8>, usize) {
+    let n = result.len();
+    let byte_len = n * FS;
+    let mut buf: Vec<u8> = Vec::with_capacity(byte_len);
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            result.as_ptr() as *const u8,
+            buf.as_mut_ptr(),
+            byte_len,
+        );
+        buf.set_len(byte_len);
+    }
+    (buf, n)
 }
 
 /// Wrap raw little-endian field-element bytes (as produced by
