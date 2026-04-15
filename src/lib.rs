@@ -129,6 +129,115 @@ pub unsafe extern "C" fn gw_calc_witness(
     0
 }
 
+/// # Safety
+/// See gw_calc_witness.
+#[no_mangle]
+pub unsafe extern "C" fn gw_prepare_graph(
+    graph_data: *const c_void,
+    graph_data_len: usize,
+    handle_out: *mut *mut c_void,
+    status: *mut gw_status_t,
+) -> c_int {
+    if graph_data.is_null() {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "graph_data is null");
+        return 1;
+    }
+    if graph_data_len == 0 {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "graph_data_len is 0");
+        return 1;
+    }
+    if handle_out.is_null() {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "handle_out is null");
+        return 1;
+    }
+
+    let bytes = from_raw_parts(graph_data as *const u8, graph_data_len);
+    match prepare_graph(bytes) {
+        Ok(graph) => {
+            *handle_out = Box::into_raw(Box::new(graph)) as *mut c_void;
+            0
+        }
+        Err(e) => {
+            prepare_status(
+                status,
+                GW_ERROR_CODE_ERROR,
+                format!("Failed to prepare graph: {:?}", e).as_str(),
+            );
+            1
+        }
+    }
+}
+
+/// # Safety
+/// `handle` must have been returned by a successful call to
+/// `gw_prepare_graph` and not yet freed via `gw_free_graph`.
+#[no_mangle]
+pub unsafe extern "C" fn gw_calc_witness_prepared(
+    handle: *const c_void,
+    inputs: *const c_char,
+    wtns_data: *mut *mut c_void,
+    wtns_len: *mut usize,
+    status: *mut gw_status_t,
+) -> c_int {
+    if handle.is_null() {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "handle is null");
+        return 1;
+    }
+    if inputs.is_null() {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "inputs is null");
+        return 1;
+    }
+
+    let inputs_str = match CStr::from_ptr(inputs).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            prepare_status(
+                status,
+                GW_ERROR_CODE_ERROR,
+                format!("Failed to parse inputs as UTF-8 string: {}", e).as_str(),
+            );
+            return 1;
+        }
+    };
+
+    let graph = &*(handle as *const PreparedGraph);
+    let witness_data = match calc_witness_prepared(graph, inputs_str) {
+        Ok(w) => w,
+        Err(e) => {
+            prepare_status(
+                status,
+                GW_ERROR_CODE_ERROR,
+                format!("Failed to calculate witness: {:?}", e).as_str(),
+            );
+            return 1;
+        }
+    };
+
+    *wtns_len = witness_data.len();
+    *wtns_data = libc::malloc(witness_data.len());
+    if (*wtns_data).is_null() {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "Failed to allocate memory for wtns_data");
+        return 1;
+    }
+    libc::memcpy(
+        *wtns_data,
+        witness_data.as_ptr() as *const c_void,
+        witness_data.len(),
+    );
+
+    0
+}
+
+/// # Safety
+/// `handle` must have been returned by `gw_prepare_graph` and not yet freed.
+/// After this call the handle must not be used again.
+#[no_mangle]
+pub unsafe extern "C" fn gw_free_graph(handle: *mut c_void) {
+    if !handle.is_null() {
+        drop(Box::from_raw(handle as *mut PreparedGraph));
+    }
+}
+
 // create a wtns file bytes from witness (array of field elements)
 pub fn wtns_from_u256_witness(witness: Vec<U256>) -> Vec<u8> {
     let vec_witness: Vec<FieldElement<32>> = witness
@@ -175,31 +284,42 @@ pub fn calc_witness(
     }
 }
 
-fn calc_witness_graph(
+/// A graph parsed once from the .bin bytes. Reusable across many witness
+/// calculations; avoids repaying the ~275 ms deserialization cost per call.
+pub struct PreparedGraph {
+    nodes: Box<dyn NodesInterface>,
+    signals: Vec<usize>,
+    input_info: InputInfo,
+}
+
+// Safety: calc_witness_prepared takes &PreparedGraph and evaluate() only reads
+// the graph. The C FFI caller is responsible for not freeing the handle while
+// calls are in flight.
+unsafe impl Send for PreparedGraph {}
+unsafe impl Sync for PreparedGraph {}
+
+pub fn prepare_graph(graph_data: &[u8]) -> Result<PreparedGraph, Box<dyn std::error::Error>> {
+    let (nodes, signals, input_info) =
+        deserialize_witnesscalc_graph_from_bytes(graph_data)
+            .map_err(|e| anyhow!("Failed to deserialize graph: {:?}", e))?;
+    Ok(PreparedGraph { nodes, signals, input_info })
+}
+
+pub fn calc_witness_prepared(
+    graph: &PreparedGraph,
     inputs: &str,
-    graph_data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-
-    let start = std::time::Instant::now();
-    let (nodes, signals, input_info): (Box<dyn NodesInterface>, Vec<usize>, InputInfo) =
-        deserialize_witnesscalc_graph_from_bytes(graph_data).unwrap();
-    println!("Graph loaded in {:?}", start.elapsed());
-
-    let start = std::time::Instant::now();
-    // let mut inputs_buffer = get_inputs_buffer(nodes.get_inputs_size());
-    // populate_inputs(&inputs, &input_mapping, &mut inputs_buffer);
-    println!("Inputs populated in {:?}", start.elapsed());
-
-    if let Some(nodes) = nodes.as_any().downcast_ref::<Nodes<U254, VecNodes>>() {
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if let Some(nodes) = graph.nodes.as_any().downcast_ref::<Nodes<U254, VecNodes>>() {
         let result = calc_witness_typed(
-            nodes, inputs, &signals, &input_info)?;
+            nodes, inputs, &graph.signals, &graph.input_info)?;
         let vec_witness: Vec<FieldElement<32>> = result
             .iter()
             .map(|a| TryInto::<[u8; 32]>::try_into(a.as_le_slice()).unwrap().into())
             .collect();
         Ok(wtns_from_witness2(vec_witness, nodes.prime()))
-    } else if let Some(nodes) = nodes.as_any().downcast_ref::<Nodes<U64, VecNodes>>() {
+    } else if let Some(nodes) = graph.nodes.as_any().downcast_ref::<Nodes<U64, VecNodes>>() {
         let result = calc_witness_typed(
-            nodes, inputs, &signals, &input_info)?;
+            nodes, inputs, &graph.signals, &graph.input_info)?;
         let vec_witness: Vec<FieldElement<8>> = result
             .iter()
             .map(|a| TryInto::<[u8; 8]>::try_into(a.as_le_slice()).unwrap().into())
@@ -208,6 +328,17 @@ fn calc_witness_graph(
     } else {
         Err(anyhow!("Invalid nodes type").into())
     }
+}
+
+fn calc_witness_graph(
+    inputs: &str,
+    graph_data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+
+    let start = std::time::Instant::now();
+    let graph = prepare_graph(graph_data)?;
+    println!("Graph loaded in {:?}", start.elapsed());
+
+    calc_witness_prepared(&graph, inputs)
 }
 
 fn calc_witness_typed<T: FieldOps, NS: NodesStorage>(
