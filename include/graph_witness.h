@@ -21,7 +21,7 @@ gw_calc_witness(const char *inputs,
 				const gw_status_t *status);
 
 // Parse a graph binary once and return an opaque handle in *handle_out. The
-// handle can be reused across many gw_calc_witness_prepared calls; this
+// handle can be reused across many gw_calc_witness_raw_prepared calls; this
 // avoids repaying the per-call graph deserialization cost (hundreds of ms
 // for larger circuits). Free via gw_free_graph.
 int
